@@ -480,6 +480,17 @@ function onMainReady()
     eimg.setStyle('cursor', 'pointer'); // fallback
     eimg.setStyle('cursor', 'zoom-in');
   }
+  if(imgs.data[eidx].filetype == 'VIDEO')
+  {
+    var mp4 = imgs.data[eidx].mp4;
+    eimg.addEvent('click', function()
+    {
+      var nw = window.open(mp4[0], 'Video', 'heigth='+mp4[1][0]+'width='+mp4[1][1]);
+      if (window.focus)
+        nw.focus();
+      return false;
+    });
+  }
 
   // caption
   if(!imgs.data[eidx]['caption'])
