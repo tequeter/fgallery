@@ -23,6 +23,7 @@ use File::Basename qw{fileparse};
 use File::Find qw{find};
 use File::Path qw{make_path remove_tree};
 use File::Spec::Functions qw{rel2abs};
+use File::stat;
 use FindBin qw{$RealBin};
 use Getopt::Long qw{:config bundling};
 use IO::Handle;
@@ -46,12 +47,13 @@ my $ofile = 0;
 my $orient = 1;
 my $timesort = 1;
 my $revsort = 0;
-my @filetypes = ("JPEG", "PNG", "TIFF");
-my @exts = ("jpg", "jpeg", "png", "tif", "tiff");
+my @filetypes = ("JPEG", "PNG", "TIFF", "VIDEO");
+my @exts = qw{avi jpg jpeg mp4 mpg mpeg png tif tiff};
 my $ext = "jpg";
 my @minthumb = (150, 112);
 my @maxthumb = (267, 200);
 my @maxfull = (1600, 1200);
+my @maxfullvideo = (1280, 720);
 my $imgq = 90;
 my $fullpano = 1;
 my $nodown = 0;
@@ -66,6 +68,7 @@ my $workers = 0;
 my $sRGB = 1;
 my $indexUrl = undef;
 my @capmethods = ("txt", "xmp", "exif");
+my $metadataonly = 0; # Only useful to debug video generation
 
 
 # support functions
@@ -297,6 +300,40 @@ sub cap_from_props
   return $ret;
 }
 
+# ffprobe helper (identify for videos)
+sub ffprobe
+{
+  my ($file) = @_;
+  my @lines = sys(qw{ffprobe -hide_banner -show_format -v error},
+    qw{-show_entries}, 'format=:format_tags=creation_time:stream=width,height', $file);
+  @lines = grep(/=/, @lines);
+  my %props = map { split /=/ } @lines;
+
+  # I'm not sure we can actually parse portably the TZ spec in that prop,
+  # but it seems to always be UTC (Z), so let's just assume so.
+  my $utc_timestr = $props{'TAG:creation_time'};
+  $utc_timestr =~ s/\.\d+Z$// if $utc_timestr;
+  my $utc_time = eval { Time::Piece->strptime($utc_timestr, '%Y-%m-%dT%T'); };
+
+  my $local_time;
+  if(!$utc_time || !$utc_time->epoch)
+  {
+    my $stat = stat($file);
+    $local_time = localtime($stat->mtime);
+  }
+  else
+  {
+    $local_time = localtime($utc_time->epoch);
+  }
+  my $local_timestr = $local_time->strftime('%Y:%m:%d %H:%M:%S');
+
+  return {
+    ExifImageWidth  => $props{width},
+    ExifImageHeight => $props{height},
+    DateTime        => $local_timestr,
+  }
+}
+
 
 # options
 sub parse_wh
@@ -356,6 +393,7 @@ sub print_help
   -f			improve thumbnail cutting by performing face detection
   -j N			set process-level parallelism
   --max-full WxH	maximum full image size ($maxfull[0]x$maxfull[1])
+  --max-full-video WxH	maximum full video size ($maxfullvideo[0]x$maxfullvideo[1])
   --max-thumb WxH	maximum thumbnail size ($maxthumb[0]x$maxthumb[1])
   --min-thumb WxH	minimum thumbnail size ($minthumb[0]x$minthumb[1])
   --no-sRGB		do not remap preview/thumbnail color profiles to sRGB
@@ -384,6 +422,7 @@ my ($ret, @ARGS) = GetOptions(
   't' => sub { $timesort = 0; },
   'v' => sub { $verbose = 1; },
   'max-full=s' => sub { @maxfull = parse_wh(@_); },
+  'max-full-video=s' => sub { @maxfullvideo = parse_wh(@_); },
   'max-thumb=s' => sub { @maxthumb = parse_wh(@_); },
   'min-thumb=s' => sub { @minthumb = parse_wh(@_); },
   'no-sRGB' => sub { $sRGB = 0; },
@@ -430,6 +469,9 @@ if(system("jpegoptim -V >/dev/null 2>&1")) {
 }
 if(system("pngcrush -h >/dev/null 2>&1")) {
   $pngoptim = 0;
+}
+if(system("ffmpeg -h >/dev/null 2>&1") || system("ffprobe -h >/dev/null 2>&1")) {
+  @filetypes = grep { $_ ne 'VIDEO' } @filetypes;
 }
 if($facedet && system("facedetect -h >/dev/null 2>&1")) {
   fatal("cannot run \"facedetect\" (see https://www.thregr.org/~wavexx/software/facedetect/)");
@@ -487,10 +529,13 @@ my $backblur = int(($minthumb[0] + $minthumb[1]) / 2 * 0.1);
 my @backsize = (int($minthumb[0] * 4), int($minthumb[1] * 3));
 
 # cleanup target paths
-for my $path("$out/thumbs", "$out/blurs", "$out/imgs", "$out/files")
+if (!$metadataonly)
 {
-  remove_tree($path);
-  make_path($path);
+  for my $path("$out/thumbs", "$out/blurs", "$out/imgs", "$out/files")
+  {
+    remove_tree($path);
+    make_path($path);
+  }
 }
 
 # disable sub-process parallelism when threading ourselves
@@ -509,7 +554,17 @@ sub analyze_file
 
   progress::status("$base.$suffix");
 
-  my $props = ImageInfo($file, {PrintConv => 0, Sort => 'File'});
+  my $props;
+  if($suffix =~ /^(avi|mp(e?g|4))$/)
+  {
+    $props = ffprobe($file);
+    $props->{FileType} = 'VIDEO';
+  }
+  else
+  {
+    $props = ImageInfo($file, {PrintConv => 0, Sort => 'File'});
+  }
+
   unless(defined($props) && isin($props->{FileType}, @filetypes)) {
     return undef;
   }
@@ -532,6 +587,7 @@ sub analyze_file
 
   $props->{file} = $file;
   $props->{root} = $root;
+  $props->{base} = $base;
   $props->{suffix} = $suffix;
 
   # try to fetch the original image size by iterating to the last duplicated tag
@@ -605,6 +661,7 @@ for(my $n = 0; $n < $#files;)
 # gather some statistics
 my $amp = 0;
 my $ostamp = 0;
+my $amp_nimgs = 0;
 foreach my $props(@aprops)
 {
   # file timestamp
@@ -624,16 +681,21 @@ foreach my $props(@aprops)
   }
 
   # mp average
-  $props->{mp} = ($props->{ImageWidth} * $props->{ImageHeight} / 1e6);
-  $amp += $props->{mp};
+  if($props->{FileType} ne 'VIDEO')
+  {
+    $props->{mp} = ($props->{ImageWidth} * $props->{ImageHeight} / 1e6);
+    $amp += $props->{mp};
+    ++$amp_nimgs;
+  }
 }
-$amp /= @files;
+$amp /= $amp_nimgs;
 
 # 2nd pass: produce output files
 sub process_img
 {
   my %props = %{shift()};
   my $root = $props{root};
+  my $base = $props{base};
   my $suffix = $props{suffix};
   my $file = $props{file};
 
@@ -645,12 +707,17 @@ sub process_img
   my $fimg = "imgs/$fbase";
   my $fthumb = "thumbs/$fbase";
   my $fblur = "blurs/$fbase";
+  my $fwbem = "imgs/$base.wbem";
+  my $fmp4  = "imgs/$base.mp4";
 
   progress::status($fbase);
 
-  # copy source file
-  sys('cp', '-L', $file, $fout);
-  chmod(0600, $fout);
+  # copy source file (never for videos)
+  if($props{FileType} ne 'VIDEO')
+  {
+    sys('cp', '-L', $file, $fout);
+    chmod(0600, $fout);
+  }
 
   # apply lossless transforms
   if(!$keeporig)
@@ -693,84 +760,128 @@ sub process_img
 
   # generate main image
   my @sfile = ($props{ImageWidth}, $props{ImageHeight});
-  my @simg = sys('convert', '-quiet', $ftmp,
-		 '-gamma', '0.454545',
-		 '-geometry', "$maxfull[0]x$maxfull[1]>",
-		 '-print', '%w\n%h',
-		 '-gamma', '2.2',
-		 '+profile', '!icc,*',
-		 '-quality', $imgq, "$out/$fimg");
-
-  # face/center detection
-  my @center = (0.5, 0.5);
-  if($facedet)
+  my @simg;
+  if($props{FileType} eq 'VIDEO')
   {
-    if(my @faces = sys("facedetect", "--best", "--center", "$out/$fimg"))
+    # Transform the input video in formats supported by mainstream web browsers.
+    # Hopefully greatly reduce their size in the process.
+    # We naively rescale here (without checking for current size).
+    my @opts = ('-vf', "scale=$maxfullvideo[0]:$maxfullvideo[1]",
+      qw{-loglevel error -hide_banner -nostats});
+    if($workers)
     {
-      my @tmp = split(" ", $faces[0]);
-      @center = ($tmp[0] / $simg[0], $tmp[1] / $simg[1]);
+      # Multithread fgallery or the conversion tools, but not both at once
+      push @opts, qw{-threads 1};
     }
+
+    # Currently unused
+    ## From https://sites.google.com/a/webmproject.org/wiki/ffmpeg/vp9-encoding-guide
+    #my @wbem_opts = (@opts,
+    #  qw{-c:v libvpx-vp9 -b:v 1000K -speed 4 -tile-columns 6 -frame-parallel 1},
+    #  '-passlogfile', $fout);
+    #sys(qw{ffmpeg -i}, $file, qw{-pass 1}, @wbem_opts, qw{-an -f webm /dev/null});
+    #sys(qw{ffmpeg -i}, $file, qw{-pass 2}, @wbem_opts,
+    #  qw{-auto-alt-ref 1 -lag-in-frames 25 -c:a libopus -b:a 64k -f webm}, "$out/$fwbem");
+
+    # Defaults seem fine, see https://trac.ffmpeg.org/wiki/Encode/H.264
+    my @mp4_opts = (@opts, qw{-c:v libx264 -c:a aac});
+    if (!$metadataonly)
+    {
+      sys(qw{ffmpeg -i}, $file, @mp4_opts, "$out/$fmp4");
+    }
+
+    my $fakethumbsize = min(@maxthumb);
+
+    return {
+      props => \%props,
+      img   => ['Crystal_Project_Player_play.png', [256,256]],
+      thumb => ['Crystal_Project_Player_play.png', [($fakethumbsize) x 2]],
+      blur  => 'doesnotexist.png',
+      wbem  => [$fwbem, \@maxfullvideo],
+      mp4   => [$fmp4,  \@maxfullvideo],
+    };
   }
+  else
+  {
+    @simg = sys('convert', '-quiet', $ftmp,
+                   '-gamma', '0.454545',
+                   '-geometry', "$maxfull[0]x$maxfull[1]>",
+                   '-print', '%w\n%h',
+                   '-gamma', '2.2',
+                   '+profile', '!icc,*',
+                   '-quality', $imgq, "$out/$fimg");
 
-  # thumbnail size
-  my $thumbrt;
-  if($sfile[0] / $sfile[1] < $minthumb[0] / $minthumb[1]) {
-    $thumbrt = $minthumb[0] / $sfile[0];
-  } else {
-    $thumbrt = $minthumb[1] / $sfile[1];
+    # face/center detection
+    my @center = (0.5, 0.5);
+    if($facedet)
+    {
+      if(my @faces = sys("facedetect", "--best", "--center", "$out/$fimg"))
+      {
+        my @tmp = split(" ", $faces[0]);
+        @center = ($tmp[0] / $simg[0], $tmp[1] / $simg[1]);
+      }
+    }
+
+    # thumbnail size
+    my $thumbrt;
+    if($sfile[0] / $sfile[1] < $minthumb[0] / $minthumb[1]) {
+      $thumbrt = $minthumb[0] / $sfile[0];
+    } else {
+      $thumbrt = $minthumb[1] / $sfile[1];
+    }
+    my @sthumb = (max(int($sfile[0] * $thumbrt + 0.5), $minthumb[0]),
+                  max(int($sfile[1] * $thumbrt + 0.5), $minthumb[1]));
+    my @mthumb = (min($maxthumb[0], $sthumb[0]), min($maxthumb[1], $sthumb[1]));
+
+    # cropping window
+    my $dx = $sthumb[0] - $mthumb[0];
+    my $cx = clamp(0, $dx, int($center[0] * $sthumb[0] - $sthumb[0] / 2 + $dx / 2));
+    my $dy = $sthumb[1] - $mthumb[1];
+    my $cy = clamp(0, $dy, int($center[1] * $sthumb[1] - $sthumb[1] / 2 + $dy / 2));
+
+    sys('convert', '-quiet', $ftmp,
+        '-gamma', '0.454545',
+        '-resize', "$sthumb[0]x$sthumb[1]!",
+        '-gravity', 'NorthWest',
+        '-crop', "$mthumb[0]x$mthumb[1]+$cx+$cy",
+        '-gamma', '2.2',
+        '+profile', '!icc,*',
+        '-quality', $imgq, "$out/$fthumb");
+
+    # blur
+    sys('convert', '-quiet', "$out/$fthumb",
+        '-virtual-pixel', 'Mirror',
+        '-gaussian-blur', "0x$backblur",
+        '-scale', "$backsize[0]x$backsize[1]",
+        '-quality', '90', "$out/$fblur");
+
+    my %fdata;
+    $fdata{props} = \%props;
+    $fdata{img} = [$fimg, [map { int } @simg]];
+    $fdata{file} = [$ffile, [map { int } @sfile]];
+    $fdata{blur} = $fblur;
+
+    # do not store duplicate information
+    my @tdata = ($fthumb, [map { int } @mthumb]);
+    if($sthumb[0] != $mthumb[0] || $sthumb[1] != $mthumb[1]) {
+      push(@tdata, [map { int } @sthumb], [map { int } $cx, $cy]);
+    }
+    $fdata{thumb} = \@tdata;
+
+    # truncate some floats
+    $center[0] = int($center[0] * 1000);
+    $center[1] = int($center[1] * 1000);
+    if(abs($center[0] - 500) > 1 || abs($center[0] - 500) > 1) {
+      $fdata{center} = \@center;
+    }
+
+    # remove temporary files
+    if($ftmp ne $fout) {
+      unlink($ftmp);
+    }
+
+    return \%fdata;
   }
-  my @sthumb = (max(int($sfile[0] * $thumbrt + 0.5), $minthumb[0]),
-		max(int($sfile[1] * $thumbrt + 0.5), $minthumb[1]));
-  my @mthumb = (min($maxthumb[0], $sthumb[0]), min($maxthumb[1], $sthumb[1]));
-
-  # cropping window
-  my $dx = $sthumb[0] - $mthumb[0];
-  my $cx = clamp(0, $dx, int($center[0] * $sthumb[0] - $sthumb[0] / 2 + $dx / 2));
-  my $dy = $sthumb[1] - $mthumb[1];
-  my $cy = clamp(0, $dy, int($center[1] * $sthumb[1] - $sthumb[1] / 2 + $dy / 2));
-
-  sys('convert', '-quiet', $ftmp,
-      '-gamma', '0.454545',
-      '-resize', "$sthumb[0]x$sthumb[1]!",
-      '-gravity', 'NorthWest',
-      '-crop', "$mthumb[0]x$mthumb[1]+$cx+$cy",
-      '-gamma', '2.2',
-      '+profile', '!icc,*',
-      '-quality', $imgq, "$out/$fthumb");
-
-  # blur
-  sys('convert', '-quiet', "$out/$fthumb",
-      '-virtual-pixel', 'Mirror',
-      '-gaussian-blur', "0x$backblur",
-      '-scale', "$backsize[0]x$backsize[1]",
-      '-quality', '90', "$out/$fblur");
-
-  my %fdata;
-  $fdata{props} = \%props;
-  $fdata{img} = [$fimg, [map { int } @simg]];
-  $fdata{file} = [$ffile, [map { int } @sfile]];
-  $fdata{blur} = $fblur;
-
-  # do not store duplicate information
-  my @tdata = ($fthumb, [map { int } @mthumb]);
-  if($sthumb[0] != $mthumb[0] || $sthumb[1] != $mthumb[1]) {
-    push(@tdata, [map { int } @sthumb], [map { int } $cx, $cy]);
-  }
-  $fdata{thumb} = \@tdata;
-
-  # truncate some floats
-  $center[0] = int($center[0] * 1000);
-  $center[1] = int($center[1] * 1000);
-  if(abs($center[0] - 500) > 1 || abs($center[0] - 500) > 1) {
-    $fdata{center} = \@center;
-  }
-
-  # remove temporary files
-  if($ftmp ne $fout) {
-    unlink($ftmp);
-  }
-
-  return \%fdata;
 }
 
 progress::init("processing", scalar(@aprops));
@@ -855,7 +966,7 @@ $json{thumb} = { min => \@minthumb, max => \@maxthumb };
 foreach my $fdata(@adata)
 {
   my %data;
-  foreach('img', 'thumb', 'file', 'blur', 'center') {
+  foreach(qw{img thumb file blur center wbem mp4}) {
     if(defined($fdata->{$_})) {
       $data{$_} = $fdata->{$_};
     }
@@ -864,6 +975,9 @@ foreach my $fdata(@adata)
     if(defined($fdata->{props}{$_})) {
       $data{$_} = $fdata->{props}{$_};
     }
+  }
+  if(defined($fdata->{props}{FileType})) {
+    $data{filetype} = $fdata->{props}{FileType};
   }
   push(@{$json{data}}, \%data);
 }
