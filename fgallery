@@ -707,8 +707,8 @@ sub process_img
   my $fimg = "imgs/$fbase";
   my $fthumb = "thumbs/$fbase";
   my $fblur = "blurs/$fbase";
-  my $fwbem = "$out/imgs/$base.wbem";
-  my $fmp4  = "$out/imgs/$base.mp4";
+  my $fwbem = "imgs/$base.wbem";
+  my $fmp4  = "imgs/$base.mp4";
 
   progress::status($fbase);
 
@@ -781,13 +781,13 @@ sub process_img
     #  '-passlogfile', $fout);
     #sys(qw{ffmpeg -i}, $file, qw{-pass 1}, @wbem_opts, qw{-an -f webm /dev/null});
     #sys(qw{ffmpeg -i}, $file, qw{-pass 2}, @wbem_opts,
-    #  qw{-auto-alt-ref 1 -lag-in-frames 25 -c:a libopus -b:a 64k -f webm}, $fwbem);
+    #  qw{-auto-alt-ref 1 -lag-in-frames 25 -c:a libopus -b:a 64k -f webm}, "$out/$fwbem");
 
     # Defaults seem fine, see https://trac.ffmpeg.org/wiki/Encode/H.264
     my @mp4_opts = (@opts, qw{-c:v libx264 -c:a aac});
     if (!$metadataonly)
     {
-      sys(qw{ffmpeg -i}, $file, @mp4_opts, $fmp4);
+      sys(qw{ffmpeg -i}, $file, @mp4_opts, "$out/$fmp4");
     }
 
     my $fakethumbsize = min(@maxthumb);
