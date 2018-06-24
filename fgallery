@@ -312,7 +312,7 @@ sub ffprobe
   # I'm not sure we can actually parse portably the TZ spec in that prop,
   # but it seems to always be UTC (Z), so let's just assume so.
   my $utc_timestr = $props{'TAG:creation_time'};
-  $utc_timestr =~ s/\.\d+Z$//;
+  $utc_timestr =~ s/\.\d+Z$// if $utc_timestr;
   my $utc_time = eval { Time::Piece->strptime($utc_timestr, '%Y-%m-%dT%T'); };
 
   my $local_time;
