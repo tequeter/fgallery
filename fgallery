@@ -927,6 +927,8 @@ if(!$ofile || $slim)
 {
   for my $fdata(@adata)
   {
+    next unless exists $fdata->{file}; # Videos don't have these
+
     my $file = "$out/$fdata->{'file'}[0]";
     my $keep = !$slim && $ofile;
 
