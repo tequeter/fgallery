@@ -767,7 +767,7 @@ sub process_img
   {
     # Transform the input video in formats supported by mainstream web browsers.
     # Hopefully greatly reduce their size in the process.
-    # We naively rescale here (without checking for current size).
+    # We naively rescale here, only skipping if the resolution would not be reduced.
     my @opts = ('-vf', "scale=$maxfullvideo[0]:$maxfullvideo[1]",
       qw{-loglevel error -hide_banner -nostats});
     if($workers)
@@ -789,7 +789,15 @@ sub process_img
     my @mp4_opts = (@opts, qw{-c:v libx264 -c:a aac});
     if (!$metadataonly)
     {
-      sys(qw{ffmpeg -i}, $file, @mp4_opts, "$out/$fmp4");
+      if ($sfile[0] <= $maxfullvideo[0] && $sfile[1] <= $maxfullvideo[1])
+      {
+        # Assume the current encoding is good enough...
+        sys('cp', '-L', $file, "$out/$fmp4");
+      }
+      else
+      {
+        sys(qw{ffmpeg -i}, $file, @mp4_opts, "$out/$fmp4");
+      }
     }
 
     my $fakethumbsize = min(@maxthumb);
@@ -799,8 +807,8 @@ sub process_img
       img   => ['Crystal_Project_Player_play.png', [256,256]],
       thumb => ['Crystal_Project_Player_play.png', [($fakethumbsize) x 2]],
       blur  => 'doesnotexist.png',
-      wbem  => [$fwbem, \@maxfullvideo],
-      mp4   => [$fmp4,  \@maxfullvideo],
+      wbem  => [$fwbem, \@sfile],
+      mp4   => [$fmp4,  \@sfile],
     };
   }
   else
