@@ -330,6 +330,8 @@ sub ffprobe
   return {
     ExifImageWidth  => $props{width},
     ExifImageHeight => $props{height},
+    ImageWidth      => $props{width},
+    ImageHeight     => $props{height},
     DateTime        => $local_timestr,
   }
 }
