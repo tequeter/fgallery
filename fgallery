@@ -53,7 +53,7 @@ my $ext = "jpg";
 my @minthumb = (150, 112);
 my @maxthumb = (267, 200);
 my @maxfull = (1600, 1200);
-my @maxfullvideo = (1280, 720);
+my $maxfullvideo = 1080;
 my $imgq = 90;
 my $fullpano = 1;
 my $nodown = 0;
@@ -395,7 +395,7 @@ sub print_help
   -f			improve thumbnail cutting by performing face detection
   -j N			set process-level parallelism
   --max-full WxH	maximum full image size ($maxfull[0]x$maxfull[1])
-  --max-full-video WxH	maximum full video size ($maxfullvideo[0]x$maxfullvideo[1])
+  --max-full-video H	maximum full video height ($maxfullvideo)
   --max-thumb WxH	maximum thumbnail size ($maxthumb[0]x$maxthumb[1])
   --min-thumb WxH	minimum thumbnail size ($minthumb[0]x$minthumb[1])
   --no-sRGB		do not remap preview/thumbnail color profiles to sRGB
@@ -424,7 +424,7 @@ my ($ret, @ARGS) = GetOptions(
   't' => sub { $timesort = 0; },
   'v' => sub { $verbose = 1; },
   'max-full=s' => sub { @maxfull = parse_wh(@_); },
-  'max-full-video=s' => sub { @maxfullvideo = parse_wh(@_); },
+  'max-full-video=i' => sub { $maxfullvideo = parse_int(@_, 1, 10000); },
   'max-thumb=s' => sub { @maxthumb = parse_wh(@_); },
   'min-thumb=s' => sub { @minthumb = parse_wh(@_); },
   'no-sRGB' => sub { $sRGB = 0; },
@@ -767,8 +767,7 @@ sub process_img
   {
     # Transform the input video in formats supported by mainstream web browsers.
     # Hopefully greatly reduce their size in the process.
-    # We naively rescale here (without checking for current size).
-    my @opts = ('-vf', "scale=$maxfullvideo[0]:$maxfullvideo[1]",
+    my @opts = ('-vf', "scale=-2:'min($maxfullvideo,ih)'",
       qw{-loglevel error -hide_banner -nostats});
     if($workers)
     {
@@ -799,8 +798,8 @@ sub process_img
       img   => ['Crystal_Project_Player_play.png', [256,256]],
       thumb => ['Crystal_Project_Player_play.png', [($fakethumbsize) x 2]],
       blur  => 'doesnotexist.png',
-      wbem  => [$fwbem, \@maxfullvideo],
-      mp4   => [$fmp4,  \@maxfullvideo],
+      wbem  => [$fwbem, \@sfile],
+      mp4   => [$fmp4,  \@sfile],
     };
   }
   else
